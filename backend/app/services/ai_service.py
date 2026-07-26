@@ -8,17 +8,36 @@ from app.services.observability import metrics
 
 
 def _extract_json(text: str) -> dict:
-    """Parse a JSON object from an LLM reply, tolerating code fences and
-    <think> reasoning blocks emitted by thinking models."""
+    """Parse a JSON object from an LLM reply, tolerating code fences, <think>
+    reasoning blocks, and trailing prose after the object (some models, incl.
+    the Catalyst GLM, append an explanation after the JSON — which plain
+    json.loads rejects as 'Extra data')."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Prefer a fenced ```json block (greedy, so nested braces survive).
     if "```" in text:
-        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+        m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, flags=re.DOTALL)
         if m:
             text = m.group(1)
-    if not text.lstrip().startswith("{"):
-        m = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if m:
-            text = m.group(0)
+    # Try every '{' as a start and raw_decode from there — a reasoning model may
+    # emit prose (with stray braces) before the real object, so return the first
+    # brace position that yields a dict with our expected keys, else the first
+    # that parses at all.
+    decoder = json.JSONDecoder()
+    first_ok = None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            if first_ok is None:
+                first_ok = obj
+            if obj.keys() & {"summary", "detected_patterns", "translated_query", "ok"}:
+                return obj
+    if first_ok is not None:
+        return first_ok
     return json.loads(text)
 
 
@@ -410,19 +429,40 @@ class CatalystGLMService(BaseAIService):
             and os.getenv("GLM_CLIENT_SECRET")
         )
 
-    def _chat(self, system: str, user: str, max_tokens: int = 1024) -> str:
+    def _chat(self, system: str, user: str, max_tokens: int = 1024, json_mode: bool = False,
+              temperature: float = 0.4) -> str:
         import requests
 
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0.4,
-            "stream": False,
-        }
+        # JSON tasks want determinism (less reasoning drift); prose can breathe.
+        if json_mode:
+            temperature = 0.1
+        # Two endpoint shapes: GLM chat is OpenAI-style (`messages`); the VLM
+        # (e.g. VL-Qwen) uses `prompt` + `system_prompt` (+ optional images).
+        if "/vlm/" in self.url:
+            body = {
+                "model": self.model,
+                "prompt": user,
+                "system_prompt": system,
+                "images": [],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": 0.9,
+                "top_k": 50,
+            }
+        else:
+            body = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": False,
+            }
+        # NB: `json_mode` intentionally does NOT send OpenAI's response_format —
+        # this QuickML GLM endpoint rejects it with HTTP 400. JSON is coaxed via
+        # the prompt and parsed leniently (_extract_json digs the object out).
         # Retry once on 401: the cached access token may have just expired, so
         # invalidate and re-mint from the refresh token (skip when a static
         # token is pinned — re-minting can't help there).
@@ -441,25 +481,83 @@ class CatalystGLMService(BaseAIService):
             if resp.status_code == 401 and attempt == 0 and using_refresh:
                 _CatalystToken.invalidate()
                 continue
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            if resp.status_code >= 400:
+                # Surface the body — a bare "400 Client Error" hides the reason
+                # (unsupported param, bad model name, quota, etc.).
+                raise RuntimeError(f"GLM HTTP {resp.status_code}: {resp.text[:300]}")
+            if os.getenv("GLM_DEBUG", "").lower() == "true":
+                print(f"[CatalystGLM] raw response: {resp.text[:700]}")
+            return self._extract_content(resp.json()).strip()
+
+    @staticmethod
+    def _extract_content(data) -> str:
+        """
+        Pull the generated text from a QuickML GLM response. The endpoint is
+        *mostly* OpenAI-shaped but not guaranteed, so probe the known layouts
+        and, if none match, raise with the actual keys so the fallback log
+        surfaces the real structure instead of a bare KeyError.
+        """
+        if isinstance(data, str):
+            return data
+        if not isinstance(data, dict):
+            raise RuntimeError(f"GLM: unexpected response type {type(data).__name__}")
+        # OpenAI-style: choices[0].message.content | choices[0].text
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            c0 = choices[0]
+            if isinstance(c0, dict):
+                msg = c0.get("message") or c0.get("delta") or {}
+                if isinstance(msg, dict) and msg.get("content"):
+                    return msg["content"]
+                if c0.get("text"):
+                    return c0["text"]
+        # Flat alternatives seen across Zoho/QuickML serving responses
+        for key in ("output", "text", "response", "content", "result",
+                    "answer", "generated_text", "prediction", "completion"):
+            v = data.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+        # Nested envelopes: {"data": {...|"..."}} or {"message": {"content": "..."}}
+        nested = data.get("data")
+        if isinstance(nested, (dict, str)):
+            try:
+                return CatalystGLMService._extract_content(nested)
+            except RuntimeError:
+                pass
+        msg = data.get("message")
+        if isinstance(msg, dict) and msg.get("content"):
+            return msg["content"]
+        raise RuntimeError(
+            f"GLM: no content field; keys={list(data.keys())} "
+            f"sample={json.dumps(data, default=str)[:400]}"
+        )
 
     def analyze_crime_pattern(self, query_text: str, historical_records: list, language: str = "en") -> dict:
         try:
-            records = json.dumps(historical_records[:30], default=str)
+            # Fewer, leaner records → less for the reasoning model to chew on.
+            # A terse prompt matters: verbose "no markdown / start with {"
+            # instructions get echoed back as chain-of-thought and burn the
+            # token budget before the JSON is produced.
+            records = json.dumps(historical_records[:12], default=str)
             system = (
-                "You are a lead crime analyst for the Karnataka State Police. "
-                "Reply ONLY with a single JSON object, no prose."
+                "You are a crime analyst for the Karnataka State Police. "
+                "Respond with a single JSON object only."
             )
             user = (
-                "Analyse the investigator query against the recent FIR records and return JSON with keys: "
-                "summary (string), detected_patterns (array of strings), confidence_score (number 0-1), "
-                "recommended_actions (array of strings), audit_explanation (string). "
-                f"Investigator query: {query_text}\nFIR records: {records}"
+                "Keys: summary (string), detected_patterns (array, <=4), "
+                "confidence_score (0-1), recommended_actions (array, <=4), "
+                "audit_explanation (string).\n"
+                f"Query: {query_text}\nFIR records: {records}"
                 + (_KANNADA_JSON if language == "kn" else "")
             )
             start = time.perf_counter()
-            result = _extract_json(self._chat(system, user, 1100))
+            raw = self._chat(system, user, 2048, json_mode=True)
+            # Use Catalyst only when it yields a real analysis object; if it just
+            # reasoned out loud (no parseable JSON), fall back for a clean answer
+            # instead of surfacing raw chain-of-thought.
+            result = _extract_json(raw)
+            if not (isinstance(result, dict) and result.get("summary")):
+                raise ValueError("no analysis JSON in GLM reply")
             metrics.record_ai(True, "catalyst", self.model, (time.perf_counter() - start) * 1000)
             return result
         except Exception as exc:  # noqa: BLE001
@@ -486,7 +584,11 @@ class CatalystGLMService(BaseAIService):
 
     def translate_kannada_query(self, query_text: str) -> dict:
         try:
-            system = "You are a translation assistant for the Karnataka State Police. Reply ONLY with JSON."
+            system = (
+                "You are a translation assistant for the Karnataka State Police. "
+                "Output ONLY a single JSON object, nothing else — no reasoning, no "
+                "markdown, no text before or after. Start your reply with '{'."
+            )
             user = (
                 "Detect the language of the input. If Kannada, translate to English; if English, keep it. "
                 "Return JSON with keys: original_query (string), translated_query (string), "
@@ -494,7 +596,7 @@ class CatalystGLMService(BaseAIService):
                 f"Input: {query_text.strip()}"
             )
             start = time.perf_counter()
-            result = _extract_json(self._chat(system, user, 400))
+            result = _extract_json(self._chat(system, user, 400, json_mode=True))
             metrics.record_ai(True, "catalyst", self.model, (time.perf_counter() - start) * 1000)
             return result
         except Exception as exc:  # noqa: BLE001

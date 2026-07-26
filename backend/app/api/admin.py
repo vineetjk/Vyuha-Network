@@ -180,3 +180,58 @@ def get_metrics(current_user: models.User = Depends(require_admin)):
     snap["ai_configured"] = LLMAIService.is_configured()
     snap["ocr_configured"] = bool(os.getenv("ZIA_OCR_URL") and os.getenv("ZIA_CODELIB_SECRET"))
     return snap
+
+
+@router.get("/ai-selftest")
+def ai_selftest(
+    model: Optional[str] = None,
+    url: Optional[str] = None,
+    current_user: models.User = Depends(require_admin),
+):
+    """
+    Directly exercise the Catalyst GLM/VLM on THIS instance with a realistic
+    crime-analysis JSON prompt, bypassing the fallback chain. Pass ?model=... and
+    ?url=... to try a different QuickML deployment (e.g. the VL-Qwen VLM at
+    .../vlm/chat) without redeploying.
+    """
+    from app.services.ai_service import (
+        LLMAIService, CatalystGLMService, MockAIService, _extract_json,
+    )
+
+    out = {
+        "catalyst_configured": CatalystGLMService.is_configured(),
+        "groq_configured": LLMAIService.is_configured(),
+        "model": model or os.getenv("GLM_AI_MODEL", "crm-di-glm47b_30b_it"),
+        "url": url or os.getenv("GLM_AI_URL", CatalystGLMService.DEFAULT_URL),
+    }
+    if not CatalystGLMService.is_configured():
+        return out
+    svc = CatalystGLMService(fallback=MockAIService())
+    if model:
+        svc.model = model
+    if url:
+        svc.url = url
+    system = (
+        "You are a lead crime analyst for the Karnataka State Police. Output ONLY "
+        "a single JSON object and nothing else — no markdown, no reasoning. Start with '{'."
+    )
+    user = (
+        'Return a JSON object with keys summary (string), detected_patterns (array), '
+        'confidence_score (number 0-1), recommended_actions (array), audit_explanation (string). '
+        "FIR records: [{\"district\":\"Mysuru\",\"crime\":\"Murder\",\"ps\":\"PS 2\"},"
+        "{\"district\":\"Mysuru\",\"crime\":\"Drug Trafficking\",\"ps\":\"PS 3\"}]"
+    )
+    try:
+        raw = svc._chat(system, user, 900, json_mode=True)
+        out["catalyst_ok"] = True
+        out["raw_head"] = raw[:120]
+        try:
+            parsed = _extract_json(raw)
+            out["clean_json"] = isinstance(parsed, dict) and "summary" in parsed
+            out["parsed_keys"] = list(parsed.keys()) if isinstance(parsed, dict) else None
+        except Exception:  # noqa: BLE001
+            out["clean_json"] = False
+    except Exception as exc:  # noqa: BLE001
+        out["catalyst_ok"] = False
+        out["catalyst_error"] = str(exc)[:400]
+    return out

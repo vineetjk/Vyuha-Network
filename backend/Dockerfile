@@ -19,17 +19,23 @@ COPY . .
 
 # Runtime config for the Catalyst deployment. The client (Web Client Hosting)
 # is a separate origin, and the API is stateless Bearer-token auth, so wildcard
-# CORS (credentials off) is safe. Flip MOCK_AI_PIPELINE / CATALYST_AI_ENABLED
-# here (or in the console) to enable Gemini / Zia.
+# CORS (credentials off) is safe.
 # Catalyst's AppSail gateway handles CORS; the app must not add its own or the
 # browser sees duplicate Access-Control-Allow-Origin headers.
+#
+# Only NON-SECRET plumbing is baked here so it survives container recycles
+# (runtime values set via /admin live only in one process and are lost on
+# restart). Real AI is on (MOCK_AI_PIPELINE=false) with Groq as the provider
+# and the Zia OCR endpoint pre-wired. SECRETS — FALLBACK_AI_API_KEYS (Groq key),
+# ZIA_CODELIB_SECRET, CATALYST_AI_TOKEN, DATABASE_URL — are NOT baked in; set
+# them via /admin or the Catalyst console so they never enter the image or git.
 ENV DISABLE_APP_CORS=true \
-    MOCK_AI_PIPELINE=true \
+    AUTO_SEED=true \
+    MOCK_AI_PIPELINE=false \
     CATALYST_AI_ENABLED=false \
-    AUTO_SEED=true
-# ZIA_OCR_URL and ZIA_CODELIB_SECRET (for the Zia OCR CodeLib) are NOT baked in
-# — set them as environment variables on the AppSail app in the Catalyst
-# console so the secret never enters the image or git.
+    FALLBACK_AI_BASE_URL=https://api.groq.com/openai/v1 \
+    FALLBACK_AI_MODEL=llama-3.3-70b-versatile \
+    ZIA_OCR_URL=https://vyuha-network-60080167463.development.catalystserverless.in/server/catalyst-zia-services/ocr
 
 # Catalyst injects the port via X_ZOHO_CATALYST_LISTEN_PORT (default 9000).
 EXPOSE 9000
