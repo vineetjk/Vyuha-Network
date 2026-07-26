@@ -41,28 +41,32 @@ def post_chat_query(
             detail="Query text or voice audio is required"
         )
 
-    # 2. Run translation & language detection
-    translation_result = ai_service.translate_kannada_query(query_text)
-    detected_lang = translation_result["detected_language"]
-    translated_text = translation_result["translated_query"]
+    # 2. Language detection is a local Unicode check — no AI round-trip. The
+    #    analyzer model reads Kannada natively, so we pass the query as-is and
+    #    tell the model to answer in Kannada (via language=). This removes a
+    #    slow, failure-prone second LLM call that was doubling chat latency.
+    # Kannada Unicode block is U+0C80–U+0CFF.
+    detected_lang = "kn" if any(0x0C80 <= ord(ch) <= 0x0CFF for ch in query_text) else "en"
+    translated_text = query_text
 
-    # 3. Fetch recent FIR cases from the database to provide as context to the LLM.
+    # 3. Fetch recent FIR cases as LLM context. Keep the payload compact — the
+    #    analyzer is a reasoning model, so long BriefFacts blobs balloon its
+    #    thinking and push latency past the gateway timeout. District/category/
+    #    gravity/date are enough to spot patterns; description is trimmed short.
     cases = (
         db.query(models.CaseMaster)
         .order_by(models.CaseMaster.CrimeRegisteredDate.desc())
-        .limit(50)
+        .limit(20)
         .all()
     )
     historical_data = []
     for c in cases:
         historical_data.append({
-            "FIR": c.CrimeNo,
-            "station": c.unit.UnitName if c.unit else None,
             "district": c.unit.district.DistrictName if c.unit and c.unit.district else None,
             "category": c.minor_head.CrimeHeadName if c.minor_head else None,
             "gravity": c.gravity.LookupValue if c.gravity else None,
             "date": c.CrimeRegisteredDate.strftime("%Y-%m-%d") if c.CrimeRegisteredDate else None,
-            "description": c.BriefFacts,
+            "brief": (c.BriefFacts or "")[:90],
         })
 
     # 4. Invoke LLM pattern analyzer. Pass the detected language so the model

@@ -460,6 +460,11 @@ class CatalystGLMService(BaseAIService):
                 "temperature": temperature,
                 "stream": False,
             }
+            # Reasoning models (this GLM included) otherwise spend the whole
+            # token budget "thinking" and never reach the JSON — slow AND
+            # unparseable. Ask the server to disable thinking for JSON tasks.
+            if json_mode:
+                body["chat_template_kwargs"] = {"enable_thinking": False}
         # NB: `json_mode` intentionally does NOT send OpenAI's response_format —
         # this QuickML GLM endpoint rejects it with HTTP 400. JSON is coaxed via
         # the prompt and parsed leniently (_extract_json digs the object out).
@@ -551,7 +556,10 @@ class CatalystGLMService(BaseAIService):
                 + (_KANNADA_JSON if language == "kn" else "")
             )
             start = time.perf_counter()
-            raw = self._chat(system, user, 2048, json_mode=True)
+            # Cap tokens so a slow reasoning pass still returns before the
+            # AppSail gateway's ~30s request timeout (which shows as the UI
+            # hanging on "…"). Enough for reasoning + a compact JSON object.
+            raw = self._chat(system, user, 1400, json_mode=True)
             # Use Catalyst only when it yields a real analysis object; if it just
             # reasoned out loud (no parseable JSON), fall back for a clean answer
             # instead of surfacing raw chain-of-thought.
