@@ -360,6 +360,17 @@ class _CatalystToken:
         return cls._access_token
 
     @classmethod
+    def configured(cls) -> bool:
+        """Whether a token can be produced — a static token or refresh creds."""
+        if os.getenv("GLM_AI_TOKEN"):
+            return True
+        return bool(
+            os.getenv("GLM_REFRESH_TOKEN")
+            and os.getenv("GLM_CLIENT_ID")
+            and os.getenv("GLM_CLIENT_SECRET")
+        )
+
+    @classmethod
     def invalidate(cls) -> None:
         cls._access_token = ""
         cls._expires_at = 0.0

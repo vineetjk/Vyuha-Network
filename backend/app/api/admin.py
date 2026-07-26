@@ -16,9 +16,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.api.deps import RoleChecker
 from app.db import models
+from app.db.database import get_db
 from app.services import observability
 
 router = APIRouter(prefix="/admin", tags=["Developer Console"])
@@ -37,6 +39,8 @@ KNOWN_KEYS = [
     "GLM_AI_MODEL",
     "GLM_AI_ORG",
     "GLM_AI_URL",
+    "GLM_DATASTORE_TABLE",
+    "GLM_DATASTORE_URL",
     "MOCK_AI_PIPELINE",
     "FALLBACK_AI_BASE_URL",
     "FALLBACK_AI_MODEL",
@@ -235,3 +239,29 @@ def ai_selftest(
         out["catalyst_ok"] = False
         out["catalyst_error"] = str(exc)[:400]
     return out
+
+
+@router.post("/rag-sync")
+def rag_sync(
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """
+    Push denormalized FIR cases into the Catalyst Data Store table so QuickML can
+    use it as a RAG dataset. The relational DB stays the source of truth; this
+    just mirrors a flat row per case. Requires GLM_DATASTORE_TABLE and a
+    refresh token scoped for both QuickML and ZohoCatalyst.tables.rows.CREATE.
+    """
+    from app.services import datastore
+
+    if not datastore.is_configured():
+        return {
+            "ok": False,
+            "error": "Not configured. Set GLM_DATASTORE_TABLE and a GLM_REFRESH_TOKEN "
+            "minted with scopes QuickML.deployment.READ,ZohoCatalyst.tables.rows.CREATE.",
+        }
+    try:
+        return datastore.sync_cases(db, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:400]}
