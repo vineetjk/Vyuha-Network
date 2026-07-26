@@ -77,6 +77,9 @@ def _insert_batch(rows: list) -> int:
     base = (os.getenv("GLM_DATASTORE_URL") or DEFAULT_BASE).rstrip("/")
     table = os.getenv("GLM_DATASTORE_TABLE", "rag_cases")
     org = os.getenv("GLM_AI_ORG", "60080167463")
+    # AppSail runs in the Catalyst Development environment, so Data Store writes
+    # must carry Environment: Development or they target the wrong environment.
+    env = os.getenv("GLM_DATASTORE_ENV", "Development")
     url = f"{base}/table/{table}/row"
 
     resp = requests.post(
@@ -84,11 +87,12 @@ def _insert_batch(rows: list) -> int:
         headers={
             "Content-Type": "application/json",
             # Catalyst BaaS uses the Zoho-oauthtoken prefix (unlike the QuickML
-            # GLM API's Bearer). Confirmed against the table's API Details.
+            # GLM API's Bearer) — confirmed in the Data Store REST docs.
             "Authorization": f"Zoho-oauthtoken {_CatalystToken.get()}",
             "CATALYST-ORG": org,
+            "Environment": env,
         },
-        json=rows,
+        json=rows,  # Insert Rows accepts a JSON array (up to 200 rows/call).
         timeout=45,
     )
     if resp.status_code >= 400:
