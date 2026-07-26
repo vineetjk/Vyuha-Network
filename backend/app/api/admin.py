@@ -27,14 +27,16 @@ require_admin = RoleChecker(["admin"])
 
 # Config keys the app actually reads — surfaced first in the console.
 KNOWN_KEYS = [
-    "CATALYST_AI_TOKEN",
-    "CATALYST_REFRESH_TOKEN",
-    "CATALYST_CLIENT_ID",
-    "CATALYST_CLIENT_SECRET",
-    "CATALYST_ACCOUNTS_URL",
-    "CATALYST_AI_MODEL",
-    "CATALYST_AI_ORG",
-    "CATALYST_AI_URL",
+    # GLM_ prefix (not CATALYST_): Catalyst reserves CATALYST_* and its console
+    # rejects user-defined CATALYST_* env vars.
+    "GLM_AI_TOKEN",
+    "GLM_REFRESH_TOKEN",
+    "GLM_CLIENT_ID",
+    "GLM_CLIENT_SECRET",
+    "GLM_ACCOUNTS_URL",
+    "GLM_AI_MODEL",
+    "GLM_AI_ORG",
+    "GLM_AI_URL",
     "MOCK_AI_PIPELINE",
     "FALLBACK_AI_BASE_URL",
     "FALLBACK_AI_MODEL",

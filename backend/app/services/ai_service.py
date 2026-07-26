@@ -321,7 +321,10 @@ class _CatalystToken:
     good for one hour. When the long-lived refresh-token credentials are set,
     this mints an access token from them, caches it, and auto-renews ~2 min
     before expiry — the durable way to run Catalyst as a deployed primary AI.
-    A static CATALYST_AI_TOKEN (quick testing / manual override) always wins.
+    A static GLM_AI_TOKEN (quick testing / manual override) always wins.
+
+    Note: keys use a GLM_ prefix (not CATALYST_) because Catalyst reserves the
+    CATALYST_ env-var prefix and its console rejects user-defined CATALYST_* vars.
     """
 
     _access_token: str = ""
@@ -329,7 +332,7 @@ class _CatalystToken:
 
     @classmethod
     def get(cls) -> str:
-        static = os.getenv("CATALYST_AI_TOKEN")
+        static = os.getenv("GLM_AI_TOKEN")
         if static:
             return static
         if cls._access_token and time.time() < cls._expires_at:
@@ -346,14 +349,14 @@ class _CatalystToken:
     def _refresh(cls) -> None:
         import requests
 
-        accounts = os.getenv("CATALYST_ACCOUNTS_URL", "https://accounts.zoho.in").rstrip("/")
+        accounts = os.getenv("GLM_ACCOUNTS_URL", "https://accounts.zoho.in").rstrip("/")
         resp = requests.post(
             f"{accounts}/oauth/v2/token",
             params={
                 "grant_type": "refresh_token",
-                "client_id": os.getenv("CATALYST_CLIENT_ID", ""),
-                "client_secret": os.getenv("CATALYST_CLIENT_SECRET", ""),
-                "refresh_token": os.getenv("CATALYST_REFRESH_TOKEN", ""),
+                "client_id": os.getenv("GLM_CLIENT_ID", ""),
+                "client_secret": os.getenv("GLM_CLIENT_SECRET", ""),
+                "refresh_token": os.getenv("GLM_REFRESH_TOKEN", ""),
             },
             timeout=20,
         )
@@ -373,36 +376,38 @@ class CatalystGLMService(BaseAIService):
     failure each method delegates to `fallback` (Groq, then heuristic mock), so
     the chain is Catalyst → Groq → mock.
 
-    Config (env) — either a static token OR the refresh-token credentials:
+    Config (env) — either a static token OR the refresh-token credentials.
+    Keys use a GLM_ prefix because Catalyst reserves CATALYST_* (its console
+    rejects user-defined CATALYST_* env vars):
       Static (expires in ~1h, for quick tests):
-        CATALYST_AI_TOKEN     Bearer access token
+        GLM_AI_TOKEN     Bearer access token
       Durable (auto-renewed, for deployment):
-        CATALYST_REFRESH_TOKEN  long-lived refresh token (never expires)
-        CATALYST_CLIENT_ID      Self Client id from api-console.zoho.in
-        CATALYST_CLIENT_SECRET  Self Client secret
-        CATALYST_ACCOUNTS_URL   default https://accounts.zoho.in
+        GLM_REFRESH_TOKEN  long-lived refresh token (never expires)
+        GLM_CLIENT_ID      Self Client id from api-console.zoho.in
+        GLM_CLIENT_SECRET  Self Client secret
+        GLM_ACCOUNTS_URL   default https://accounts.zoho.in
       Endpoint (safe to bake):
-        CATALYST_AI_URL    default the project's GLM chat endpoint
-        CATALYST_AI_ORG    default 60080167463
-        CATALYST_AI_MODEL  default crm-di-glm47b_30b_it
+        GLM_AI_URL    default the project's GLM chat endpoint
+        GLM_AI_ORG    default 60080167463
+        GLM_AI_MODEL  default crm-di-glm47b_30b_it
     """
 
     DEFAULT_URL = "https://api.catalyst.zoho.in/quickml/v1/project/46808000000019001/glm/chat"
 
     def __init__(self, fallback: BaseAIService):
-        self.url = os.getenv("CATALYST_AI_URL") or self.DEFAULT_URL
-        self.org = os.getenv("CATALYST_AI_ORG", "60080167463")
-        self.model = os.getenv("CATALYST_AI_MODEL", "crm-di-glm47b_30b_it")
+        self.url = os.getenv("GLM_AI_URL") or self.DEFAULT_URL
+        self.org = os.getenv("GLM_AI_ORG", "60080167463")
+        self.model = os.getenv("GLM_AI_MODEL", "crm-di-glm47b_30b_it")
         self.fallback = fallback
 
     @staticmethod
     def is_configured() -> bool:
-        if os.getenv("CATALYST_AI_TOKEN"):
+        if os.getenv("GLM_AI_TOKEN"):
             return True
         return bool(
-            os.getenv("CATALYST_REFRESH_TOKEN")
-            and os.getenv("CATALYST_CLIENT_ID")
-            and os.getenv("CATALYST_CLIENT_SECRET")
+            os.getenv("GLM_REFRESH_TOKEN")
+            and os.getenv("GLM_CLIENT_ID")
+            and os.getenv("GLM_CLIENT_SECRET")
         )
 
     def _chat(self, system: str, user: str, max_tokens: int = 1024) -> str:
@@ -421,7 +426,7 @@ class CatalystGLMService(BaseAIService):
         # Retry once on 401: the cached access token may have just expired, so
         # invalidate and re-mint from the refresh token (skip when a static
         # token is pinned — re-minting can't help there).
-        using_refresh = not os.getenv("CATALYST_AI_TOKEN")
+        using_refresh = not os.getenv("GLM_AI_TOKEN")
         for attempt in range(2):
             resp = requests.post(
                 self.url,
