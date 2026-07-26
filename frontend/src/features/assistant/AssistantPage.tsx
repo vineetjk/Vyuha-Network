@@ -32,6 +32,27 @@ const nextId = () => `msg-${Date.now()}-${messageSeq++}`;
 /** Strip the backend's inline <b> markup; render as plain text. */
 const cleanReply = (text: string) => text.replace(/<\/?b>/g, '');
 
+// Reconstruct the structured answer from a stored flat reply so restored history
+// renders as the styled AiAnswer instead of raw text. The reply_text format is
+// "{summary}\n\n<b>heading:</b>\n- item…" with patterns first, actions second —
+// we key off order (not the heading text) so it works for English and Kannada.
+const parseStructured = (
+  raw: string,
+): { summary: string; detected_patterns: string[]; recommended_actions: string[] } | null => {
+  if (!raw || !raw.includes('<b>')) return null;
+  const parts = raw.split('<b>');
+  const summary = parts[0].replace(/<\/?b>/g, '').trim();
+  const blocks = parts.slice(1).map((seg) =>
+    (seg.split('</b>')[1] ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('- '))
+      .map((l) => l.slice(2).trim())
+      .filter(Boolean),
+  );
+  return { summary, detected_patterns: blocks[0] ?? [], recommended_actions: blocks[1] ?? [] };
+};
+
 export function AssistantPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
@@ -101,6 +122,7 @@ export function AssistantPage() {
               sender: 'assistant' as const,
               text: cleanReply(entry.reply_text),
               timestamp: entry.timestamp,
+              ...(parseStructured(entry.reply_text) ?? {}),
             },
           ]);
         setMessages(restored);

@@ -1,6 +1,6 @@
 import base64
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -88,17 +88,19 @@ def post_chat_query(
         formatted_reply += f"<b>{heading_actions}:</b>\n" + "\n".join(f"- {r}" for r in recommendations)
 
     # 5. Calculate audit verification hash
-    timestamp = datetime.utcnow()
+    timestamp = datetime.now(timezone.utc)
     raw_hash_data = f"{query_text}{formatted_reply}{timestamp}"
     ver_hash = hashlib.sha256(raw_hash_data.encode("utf-8")).hexdigest()
 
-    # 6. Save audit record
+    # 6. Save audit record (store naive UTC in the column; the API returns the
+    #    aware value so clients get an ISO string with a UTC offset and render
+    #    it in local time instead of misreading UTC as local).
     audit_entry = models.ChatAudit(
         user_id=current_user.id,
         query_text=query_text,
         reply_text=formatted_reply,
         audio_url=None, # In case we add synthesis audio link later
-        timestamp=timestamp
+        timestamp=timestamp.replace(tzinfo=None)
     )
     db.add(audit_entry)
     db.commit()
@@ -133,7 +135,8 @@ def get_chat_history(db: Session = Depends(get_db), current_user: models.User = 
             "id": a.id,
             "query_text": a.query_text,
             "reply_text": a.reply_text,
-            "timestamp": a.timestamp
+            # Stored naive UTC → emit with a UTC offset so clients localise it.
+            "timestamp": a.timestamp.replace(tzinfo=timezone.utc).isoformat() if a.timestamp else None,
         })
     return result
 
