@@ -555,22 +555,33 @@ class CatalystGLMService(BaseAIService):
             # instructions get echoed back as chain-of-thought and burn the
             # token budget before the JSON is produced.
             records = json.dumps(historical_records[:12], default=str)
+            # Language: tell the model to answer in the query's language — no
+            # separate translation step. Kannada is very token-heavy (each glyph
+            # is several tokens), so a verbose Kannada reply generates for 30s+
+            # and blows the gateway timeout. Force brevity for Kannada and cap
+            # its output low so it stays fast.
+            if language == "kn":
+                lang_line = (
+                    " Write every string value in Kannada (ಕನ್ನಡ); keep JSON keys in English. "
+                    "Be concise: a 1-2 sentence summary and at most 3 short items per array."
+                )
+            else:
+                lang_line = " Write every string value in English."
             system = (
                 "You are a crime analyst for the Karnataka State Police. "
-                "Respond with a single JSON object only."
+                "Respond with a single JSON object only." + lang_line
             )
             user = (
                 "Keys: summary (string), detected_patterns (array, <=4), "
                 "confidence_score (0-1), recommended_actions (array, <=4), "
                 "audit_explanation (string).\n"
                 f"Query: {query_text}\nFIR records: {records}"
-                + (_KANNADA_JSON if language == "kn" else "")
             )
             start = time.perf_counter()
-            # Cap tokens so a slow reasoning pass still returns before the
-            # AppSail gateway's ~30s request timeout (which shows as the UI
-            # hanging on "…"). Enough for reasoning + a compact JSON object.
-            raw = self._chat(system, user, 1400, json_mode=True)
+            # Cap output so the reply returns before the AppSail gateway's ~30s
+            # timeout (the UI hangs on "…" otherwise). Kannada tokens generate
+            # slower, so a *lower* cap keeps it brief and fast, not higher.
+            raw = self._chat(system, user, 900 if language == "kn" else 1400, json_mode=True)
             # Use Catalyst only when it yields a real analysis object; if it just
             # reasoned out loud (no parseable JSON), fall back for a clean answer
             # instead of surfacing raw chain-of-thought.
